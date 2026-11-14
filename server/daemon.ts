@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { paseoHome } from "./paths";
 
 const DEFAULT_LISTEN = "127.0.0.1:6767";
 
@@ -12,7 +13,7 @@ const DEFAULT_LISTEN = "127.0.0.1:6767";
 export function daemonPort(env: NodeJS.ProcessEnv = process.env, home = homedir()): number | null {
   let listen = DEFAULT_LISTEN;
   try {
-    const config = JSON.parse(readFileSync(join(env.PASEO_HOME || join(home, ".paseo"), "config.json"), "utf8"));
+    const config = JSON.parse(readFileSync(join(paseoHome(env, home), "config.json"), "utf8"));
     if (typeof config?.daemon?.listen === "string") listen = config.daemon.listen;
   } catch {
     // no config: the daemon listens on its default

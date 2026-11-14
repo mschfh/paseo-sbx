@@ -70,6 +70,21 @@ function launcherPath(binDir: string, agent: AgentId): string {
   return join(binDir, `paseo-sbx-${agent}`);
 }
 
+/** Paseo's home directory (`$PASEO_HOME`, else `~/.paseo`); the daemon reads its config there. */
+export function paseoHome(env: NodeJS.ProcessEnv = process.env, home = homedir()): string {
+  return env.PASEO_HOME || join(home, ".paseo");
+}
+
+/**
+ * Where Paseo writes its OpenCode tool-bridge plugins (`paseo-<sha256>.mjs` / `paseo-v2-<sha256>/`,
+ * content-addressed), which OpenCode loads through the `file://` URL in `OPENCODE_CONFIG_CONTENT`:
+ * mounted read-only into OpenCode sandboxes at the same path, since the daemon, not the plugin,
+ * owns it.
+ */
+export function opencodeRuntimeDir(env: NodeJS.ProcessEnv = process.env, home = homedir()): string {
+  return join(paseoHome(env, home), "runtime", "opencode");
+}
+
 /** Provider command of an agent. Each agent has its own: some probes run only the command itself. */
 export function agentLauncher(paths: PluginPaths, agent: AgentId): string {
   return launcherPath(paths.binDir, agent);
