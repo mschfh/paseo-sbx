@@ -267,7 +267,7 @@ export function registerHandlers(server: PluginServerContext, deps: ServerDeps):
     const actual = exists ? await actualPublications(deps, name) : [];
     return {
       snapshotAt: snapshot?.at ?? null,
-      listeners: (snapshot?.listeners ?? []).filter((listener) => !hidden.has(listener.port)),
+      listeners: (snapshot?.listeners ?? []).filter((listener) => !hidden.has(listener.port) && (listener.port < 42000 || listener.port > 42999)),
       publications: (state?.publications ?? []).map((publication) => ({
         guestPort: publication.guestPort,
         allInterfaces: publication.allInterfaces,

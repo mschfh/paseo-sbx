@@ -1,10 +1,12 @@
 import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { get as httpGet } from "node:http";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { SPEC_ENV, type SandboxSpec } from "../shared/spec";
 import {
+  OPENCODE_SERVE_SOURCE,
   SEED_SETTINGS_SOURCE,
   SHELL_RC_SOURCE,
   SUPERVISOR_SOURCE,
@@ -1078,4 +1080,206 @@ describe("Sandbox terminal", () => {
     expect(shell.slice(0, 5)).toEqual(["exec", "-it", "-w", workspace, "--env-file"]);
     expect(shell.slice(6)).toEqual([sandbox.name, "bash", "--rcfile", join(sandbox.binDir, "paseo-sbx-shellrc"), "-i"]);
   });
+
+  it("sets XDG_DATA_HOME for opencode in the Sandbox terminal without changing other commands", () => {
+    const fakeBin = join(root, "opencode-bin");
+    mkdirSync(fakeBin, { recursive: true });
+    writeFileSync(join(fakeBin, "opencode"), '#!/bin/sh\nprintf "%s" "$XDG_DATA_HOME"\n', { mode: 0o755 });
+    const rc = join(root, "shellrc");
+    writeFileSync(rc, SHELL_RC_SOURCE);
+    const out = execFileSync(
+      "bash",
+      ["--norc", "--noprofile", "-c", `eval "$(sed -n '/^opencode()/,/^}/p' ${rc})"; printf "%s|%s" "$(opencode)" "$XDG_DATA_HOME"`],
+      { env: { PATH: `${fakeBin}:${process.env.PATH}`, PASEO_SBX_OPENCODE_DATA_HOME: "/homes/opencode" }, encoding: "utf8" },
+    );
+    expect(out).toBe("/homes/opencode|");
+  });
+});
+
+describe("OpenCode sessions", () => {
+  const FAKE_OPENCODE = `#!/usr/bin/env node
+const http = require('node:http');
+const args = process.argv.slice(2);
+if (args[0] === '--version') { console.log('2.1.3'); process.exit(0); }
+const portIdx = args.indexOf('--port');
+const port = portIdx >= 0 ? Number(args[portIdx + 1]) : 0;
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ cwd: process.cwd(), env: process.env }));
+});
+server.listen(port, '127.0.0.1', () => {
+  process.stdout.write('opencode server listening on http://127.0.0.1:' + server.address().port + '\\n');
+});
+`;
+
+  function opencodeSpec(overrides: Partial<SandboxSpec> = {}): SandboxSpec {
+    const homesDir = join(root, "state", "homes");
+    const sandbox = spec({
+      agent: "opencode",
+      binary: "opencode",
+      kit: "opencode",
+      agentHome: { env: "XDG_DATA_HOME", path: join(homesDir, "opencode") },
+      homesDir,
+      mounts: [homesDir],
+      ...overrides,
+    });
+    writeFileSync(join(sandbox.binDir, "opencode-serve.py"), OPENCODE_SERVE_SOURCE);
+    return sandbox;
+  }
+
+  function httpGetJson(port: number): Promise<{ cwd: string; env: Record<string, string> }> {
+    return new Promise((resolve, reject) => {
+      const req = httpGet({ host: "127.0.0.1", port, path: "/global/health", agent: false, timeout: 2000 }, (res) => {
+        let body = "";
+        res.on("data", (chunk) => {
+          body += chunk.toString();
+        });
+        res.on("end", () => {
+          try {
+            resolve(JSON.parse(body));
+          } catch (error) {
+            reject(error);
+          }
+        });
+      });
+      req.on("error", reject);
+      req.on("timeout", () => req.destroy(new Error("timeout")));
+    });
+  }
+
+  it("relays opencode serve through a published port, keeps stdin /dev/null alive, and cleans up on SIGTERM", async () => {
+    writeFileSync(join(bin, "opencode"), FAKE_OPENCODE);
+    chmodSync(join(bin, "opencode"), 0o755);
+    const sandbox = opencodeSpec();
+    const logFile = join(root, "sbx.log");
+    const stateFile = join(root, "sbx-state.json");
+    const configContent = JSON.stringify({ plugins: [{ package: "file:///tmp/paseo-v2", options: {} }] });
+
+    const child = spawn(process.execPath, [wrapper, "serve", "--hostname", "127.0.0.1", "--port", "0"], {
+      cwd: workspace,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: {
+        PATH: `${bin}:${dirname(process.execPath)}:/usr/bin:/bin`,
+        HOME: home,
+        PASEO_SBX_AGENT: "opencode",
+        PASEO_OPENCODE_BRIDGE_PORT: "49123",
+        OPENCODE_PASSWORD: "pw-secret",
+        OPENCODE_CONFIG_CONTENT: configContent,
+        FAKE_SBX_STATE: stateFile,
+        FAKE_SBX_LOG: logFile,
+        [SPEC_ENV]: JSON.stringify(sandbox),
+      },
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString();
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+    try {
+      const match = await waitFor(() => /server listening on http:\/\/127\.0\.0\.1:(\d+)\n/.exec(stdout));
+      const hostPort = Number(match[1]);
+      expect(hostPort).toBeGreaterThan(0);
+
+      const sbxState = JSON.parse(readFileSync(stateFile, "utf8")) as {
+        ports?: Record<string, { host_ip: string; host_port: number; sandbox_port: number }[]>;
+      };
+      const binding = sbxState.ports?.[sandbox.name]?.[0];
+      expect(binding?.host_ip).toBe("127.0.0.1");
+      expect(binding?.host_port).toBe(hostPort);
+      expect(binding?.sandbox_port).toBeGreaterThanOrEqual(42000);
+      expect(binding?.sandbox_port).toBeLessThanOrEqual(42999);
+
+      const response = await httpGetJson(binding!.sandbox_port);
+      expect(response.cwd).toBe(workspace);
+      expect(response.env.OPENCODE_PASSWORD).toBe("pw-secret");
+      expect(response.env.OPENCODE_CONFIG_CONTENT).toBe(configContent);
+      expect(response.env.XDG_DATA_HOME).toBe(join(sandbox.homesDir, "opencode"));
+
+      const calls = readFileSync(logFile, "utf8")
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as { args: string[]; envNames: string[] });
+      for (const call of calls) {
+        expect(call.envNames).not.toContain("OPENCODE_PASSWORD");
+        expect(call.envNames).not.toContain("OPENCODE_CONFIG_CONTENT");
+      }
+      expect(calls.find((call) => call.args[0] === "policy")?.args.at(-1)).toBe("**,localhost:49123");
+    } finally {
+      child.kill("SIGTERM");
+      await exited(child);
+    }
+
+    expect(stderr).not.toContain("Error");
+    const after = JSON.parse(readFileSync(stateFile, "utf8")) as { ports?: Record<string, unknown[]> };
+    expect(after.ports?.[sandbox.name]).toEqual([]);
+  }, 15_000);
+
+  it("runs catalog opencode serve and allows detected bridge ports", async () => {
+    writeFileSync(join(bin, "opencode"), FAKE_OPENCODE);
+    chmodSync(join(bin, "opencode"), 0o755);
+    const state = join(root, "state");
+    const workdir = join(state, "catalog", "opencode");
+    mkdirSync(workdir, { recursive: true });
+    writeFileSync(join(state, "bin", "opencode-serve.py"), OPENCODE_SERVE_SOURCE);
+    writeFileSync(join(state, "bin", "wait-ports.py"), "import sys; print('')\n");
+    writeFileSync(join(state, "bin", "loopback-forward.py"), "import time; time.sleep(60)\n");
+    const record = {
+      version: 1,
+      agent: "opencode",
+      name: "paseo-catalog-opencode-0000beef",
+      stateHome: join(state, "sbx"),
+      runDir: join(state, "run"),
+      binDir: join(state, "bin"),
+      workdir,
+      binary: "opencode",
+      cliVersion: "2.1.3",
+      claudeConfigDir: null,
+      agentHome: { env: "XDG_DATA_HOME", path: join(state, "homes", "opencode") },
+      hostSettings: null,
+      ports: [],
+      createdAt: "2026-11-14T00:00:00.000Z",
+    };
+    writeFileSync(join(state, "catalog", "opencode.json"), JSON.stringify(record));
+    const stateFile = join(root, "sbx-state.json");
+    const logFile = join(root, "sbx.log");
+    writeFileSync(stateFile, JSON.stringify({ sandboxes: [record.name] }));
+
+    const child = spawn(process.execPath, [wrapper, "serve", "--hostname", "127.0.0.1", "--port", "0"], {
+      cwd: workspace,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: {
+        PATH: `${bin}:${dirname(process.execPath)}:/usr/bin:/bin`,
+        HOME: home,
+        PASEO_SBX_AGENT: "opencode",
+        PASEO_OPENCODE_BRIDGE_PORT: "49124",
+        FAKE_SBX_STATE: stateFile,
+        FAKE_SBX_LOG: logFile,
+      },
+    });
+    let stdout = "";
+    child.stdout?.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString();
+    });
+    try {
+      const match = await waitFor(() => /server listening on http:\/\/127\.0\.0\.1:(\d+)\n/.exec(stdout));
+      const hostPort = Number(match[1]);
+      const sbxState = JSON.parse(readFileSync(stateFile, "utf8")) as {
+        ports?: Record<string, { host_port: number; sandbox_port: number }[]>;
+      };
+      const binding = sbxState.ports?.[record.name]?.[0];
+      expect(binding?.host_port).toBe(hostPort);
+      const response = await httpGetJson(binding!.sandbox_port);
+      expect(response.cwd).toBe(workdir);
+      expect(response.env.XDG_DATA_HOME).toBe(join(state, "homes", "opencode"));
+    } finally {
+      child.kill("SIGTERM");
+      await exited(child);
+    }
+    const after = JSON.parse(readFileSync(stateFile, "utf8")) as { ports?: Record<string, unknown[]> };
+    expect(after.ports?.[record.name]).toEqual([]);
+  }, 15_000);
 });

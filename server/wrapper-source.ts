@@ -28,7 +28,7 @@ const SHELL_FLAG = '--paseo-sbx-shell';
 // The agent this launcher serves; the launcher sets it, Paseo's arguments arrive untouched.
 const AGENT = process.env.PASEO_SBX_AGENT || 'claude';
 delete process.env.PASEO_SBX_AGENT;
-const FORWARDED_PREFIXES = ['ANTHROPIC_', 'CLAUDE_', 'PASEO_', 'MCP_', 'DISABLE_'];
+const FORWARDED_PREFIXES = ['ANTHROPIC_', 'CLAUDE_', 'OPENCODE_', 'PASEO_', 'MCP_', 'DISABLE_'];
 const FORWARDED_NAMES = ['API_TIMEOUT_MS', 'MAX_THINKING_TOKENS', 'LANG', 'TZ', 'NO_BROWSER'];
 // Credentials in the daemon's environment stay out of every sbx process: the sandbox daemon
 // would inherit them when a call starts it.
@@ -36,7 +36,7 @@ const CREDENTIAL_NAME = /(TOKEN|SECRET|PASSWORD|CREDENTIAL|API_?KEY|ACCESS_KEY|P
 // A catalog run Paseo started outside a session (no spec) is cut off after this long.
 const CATALOG_TIMEOUT_MS = 600000;
 // Host paths or plugin plumbing that mean nothing inside the VM.
-const HOST_ONLY = new Set([SPEC_ENV, 'PASEO_HOME', 'CLAUDE_ENV_FILE', 'CLAUDE_CONFIG_DIR']);
+const HOST_ONLY = new Set([SPEC_ENV, 'PASEO_HOME', 'CLAUDE_ENV_FILE', 'CLAUDE_CONFIG_DIR', 'OPENCODE_CONFIG_DIR']);
 // The sbx client reads these itself; a forwarded value would redirect the host-side client.
 const RESERVED = new Set(['PATH', 'HOME', 'XDG_STATE_HOME', 'XDG_RUNTIME_DIR', 'XDG_CONFIG_HOME', 'DBUS_SESSION_BUS_ADDRESS']);
 const RESERVED_PREFIXES = ['SBX_', 'DOCKER_'];
@@ -341,6 +341,50 @@ function collectLoopbackPorts(text, into) {
   while ((match = pattern.exec(text)) !== null) into.add(Number(match[1]));
 }
 
+// Paseo's OpenCode v2 bridge listens on an ephemeral host loopback port inside the daemon process
+// and hands that URL to opencode over RPC after startup; discover it from the parent daemon's
+// listening sockets so the guest forwarder relays it before opencode starts.
+function parentLoopbackPorts() {
+  const ports = new Set();
+  const explicit = Number(process.env.PASEO_OPENCODE_BRIDGE_PORT || 0);
+  if (Number.isInteger(explicit) && explicit > 0 && explicit < 65536) ports.add(explicit);
+  const ppid = process.ppid;
+  if (!(ppid > 0)) return Array.from(ports);
+  const inodes = new Set();
+  try {
+    for (const fd of fs.readdirSync('/proc/' + ppid + '/fd')) {
+      try {
+        const link = fs.readlinkSync('/proc/' + ppid + '/fd/' + fd);
+        const match = /^socket:\[(\d+)\]$/.exec(link);
+        if (match) inodes.add(match[1]);
+      } catch (error) {
+        // fd closed
+      }
+    }
+  } catch (error) {
+    return Array.from(ports);
+  }
+  if (inodes.size === 0) return Array.from(ports);
+  const loopbacks = new Set(['0100007F', '00000000', '00000000000000000000000001000000', '00000000000000000000000000000000']);
+  for (const table of ['/proc/' + ppid + '/net/tcp', '/proc/' + ppid + '/net/tcp6']) {
+    let rows;
+    try {
+      rows = fs.readFileSync(table, 'utf8').split('\n').slice(1);
+    } catch (error) {
+      continue;
+    }
+    for (const row of rows) {
+      const fields = row.trim().split(/\s+/);
+      if (fields.length < 10 || fields[3] !== '0A' || !inodes.has(fields[9])) continue;
+      const parts = fields[1].split(':');
+      if (parts.length !== 2 || !loopbacks.has(parts[0])) continue;
+      const port = parseInt(parts[1], 16);
+      if (port > 0 && port < 65536) ports.add(port);
+    }
+  }
+  return Array.from(ports);
+}
+
 // Loopback services the session talks to: Paseo's MCP server (--mcp-config), API base URLs in
 // the session environment (including forwarded variables and your Claude settings' env), and
 // anything the sandbox's own Claude settings point at.
@@ -351,6 +395,10 @@ function detectPorts(spec, env) {
   });
   for (const name of Object.keys(env)) {
     if (name.startsWith('ANTHROPIC_')) collectLoopbackPorts(env[name] || '', ports);
+  }
+  if (env.OPENCODE_CONFIG_CONTENT) collectLoopbackPorts(env.OPENCODE_CONFIG_CONTENT, ports);
+  if (spec.agent === 'opencode') {
+    for (const port of parentLoopbackPorts()) ports.add(port);
   }
   try {
     collectLoopbackPorts(fs.readFileSync(path.join(spec.claudeConfigDir, 'settings.json'), 'utf8'), ports);
@@ -762,11 +810,176 @@ function imageRewriter(spec) {
   });
 }
 
+const SERVE_RELAY_FIRST = 42000;
+const SERVE_RELAY_LAST = 42999;
+
+function serveLeaseDir(locksDir, sandboxName) {
+  return path.join(locksDir, sandboxName + '.serve-leases');
+}
+
+function unpublishServe(target, sandboxName, hostPort, relayPort) {
+  try {
+    const res = sbx(target, ['ports', sandboxName, '--json']);
+    if (res.status !== 0) return;
+    const entries = JSON.parse(res.stdout || '[]');
+    for (const entry of entries) {
+      if (entry.sandbox_port === relayPort && entry.host_port === hostPort) {
+        const binding = entry.host_ip + ':' + entry.host_port + ':' + entry.sandbox_port + '/' + entry.protocol;
+        sbx(target, ['ports', sandboxName, '--unpublish', binding]);
+      }
+    }
+  } catch (error) {
+    // sandbox already removed or stopped
+  }
+}
+
+function cleanOrphanServeRelays(target, locksDir, sandboxName) {
+  const dir = serveLeaseDir(locksDir, sandboxName);
+  let entries = [];
+  try {
+    entries = fs.readdirSync(dir);
+  } catch (error) {
+    return;
+  }
+  for (const entry of entries) {
+    const file = path.join(dir, entry);
+    try {
+      const lease = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (typeof lease.pid === 'number' && sameProcessAlive(lease)) continue;
+      if (typeof lease.hostPort === 'number' && typeof lease.relayPort === 'number') {
+        unpublishServe(target, sandboxName, lease.hostPort, lease.relayPort);
+      }
+      fs.rmSync(file, { force: true });
+    } catch (error) {
+      fs.rmSync(file, { force: true });
+    }
+  }
+}
+
+function allocateServeRelayPort(target, locksDir, sandboxName) {
+  const used = new Set();
+  try {
+    const res = sbx(target, ['ports', sandboxName, '--json']);
+    if (res.status === 0) {
+      for (const entry of JSON.parse(res.stdout || '[]')) used.add(entry.sandbox_port);
+    }
+  } catch (error) {
+    // no published ports yet
+  }
+  try {
+    for (const entry of fs.readdirSync(serveLeaseDir(locksDir, sandboxName))) {
+      try {
+        const lease = JSON.parse(fs.readFileSync(path.join(serveLeaseDir(locksDir, sandboxName), entry), 'utf8'));
+        if (typeof lease.relayPort === 'number') used.add(lease.relayPort);
+      } catch (error) {
+        // ignore
+      }
+    }
+  } catch (error) {
+    // no leases yet
+  }
+  const span = SERVE_RELAY_LAST - SERVE_RELAY_FIRST + 1;
+  const start = process.pid % span;
+  for (let i = 0; i < span; i++) {
+    const candidate = SERVE_RELAY_FIRST + ((start + i) % span);
+    if (!used.has(candidate)) return candidate;
+  }
+  throw new WrapperError('no free serve relay port in ' + SERVE_RELAY_FIRST + '-' + SERVE_RELAY_LAST);
+}
+
+function requestedServePort(cmdArgs) {
+  for (let i = 0; i < cmdArgs.length; i++) {
+    if (cmdArgs[i] === '--port' && i + 1 < cmdArgs.length) {
+      const n = Number(cmdArgs[i + 1]);
+      return Number.isInteger(n) && n > 0 && n < 65536 ? n : null;
+    }
+    if (cmdArgs[i].startsWith('--port=')) {
+      const n = Number(cmdArgs[i].slice('--port='.length));
+      return Number.isInteger(n) && n > 0 && n < 65536 ? n : null;
+    }
+  }
+  return null;
+}
+
+// Paseo runs 'opencode serve' and connects to it over HTTP on host loopback. Inside the VM,
+// opencode-serve.py binds a loopback port, relays 0.0.0.0:<relayPort> -> 127.0.0.1:<vmPort>,
+// and rewrites the listening URL to 127.0.0.1:<hostPort>. Keeping child.stdin open (even when
+// Paseo opened ours as /dev/null) lets stdin EOF serve as the teardown signal in the guest.
+function runServe(target, options) {
+  cleanOrphanServeRelays(target, options.locksDir, options.sandboxName);
+  const hostPort = requestedServePort(args) || freeHostPort('127.0.0.1');
+  const relayPort = allocateServeRelayPort(target, options.locksDir, options.sandboxName);
+  const leases = serveLeaseDir(options.locksDir, options.sandboxName);
+  fs.mkdirSync(leases, { recursive: true });
+  const leaseFile = path.join(leases, String(process.pid));
+  fs.writeFileSync(leaseFile, JSON.stringify({
+    pid: process.pid,
+    start: processStart(process.pid),
+    hostPort: hostPort,
+    relayPort: relayPort,
+  }));
+  let unpublished = false;
+  function cleanup() {
+    if (unpublished) return;
+    unpublished = true;
+    unpublishServe(target, options.sandboxName, hostPort, relayPort);
+    fs.rmSync(leaseFile, { force: true });
+  }
+  try {
+    sbxOk(target, ['ports', options.sandboxName, '--publish', '127.0.0.1:' + hostPort + ':' + relayPort], 'sbx ports --publish ' + hostPort);
+  } catch (error) {
+    fs.rmSync(leaseFile, { force: true });
+    throw error;
+  }
+  const envFile = writeEnvFile(target, options.guestEnv);
+  const envArgs = ['--env-file', envFile.file];
+  for (const name of Object.keys(envFile.inline)) envArgs.push('-e', name);
+  const helper = path.join(options.binDir, 'opencode-serve.py');
+  const guestCmd = options.prefixScript
+    ? ['sh', '-c', options.prefixScript + 'shift 2; exec python3 "$0" "$@"', helper].concat(options.prefixArgs || [], [
+        String(relayPort), String(hostPort), options.binary,
+      ], args)
+    : ['python3', helper, String(relayPort), String(hostPort), options.binary].concat(args);
+  const execArgs = ['exec', '-i', '-w', options.cwd].concat(envArgs, [options.sandboxName], guestCmd);
+  const child = cp.spawn('sbx', execArgs, {
+    stdio: ['pipe', 'pipe', 'inherit'],
+    env: Object.assign(managementEnv(target), envFile.inline),
+  });
+  child.stdin.on('error', function () {});
+  child.stdout.pipe(process.stdout);
+  if (options.timeoutMs) {
+    const timer = setTimeout(function () {
+      log('the ' + AGENT + ' catalog run took over ' + options.timeoutMs / 1000 + ' s; stopping it');
+      try { child.stdin.end(); } catch (error) {}
+      child.kill('SIGTERM');
+    }, options.timeoutMs);
+    timer.unref();
+  }
+  relaySignals(function () {
+    try { child.stdin.end(); } catch (error) {}
+    child.kill('SIGTERM');
+  });
+  child.on('exit', function (code) {
+    cleanup();
+    exitLikeChild(code);
+  });
+}
+
 // Session teardown happens in the guest. Whatever ends the session on the host (stdin closed,
 // the client killed by any signal, the daemon tree-killing us), the guest's stdin reaches EOF
 // and guest-supervisor.py stops the agent's process tree there. Host-side cleanup cannot do this
 // reliably: the daemon tree-kills any process we spawn while it shuts us down.
 function runInSandbox(spec, guest) {
+  if (spec.agent === 'opencode' && args[0] === 'serve') {
+    return runServe(spec, {
+      locksDir: spec.locksDir,
+      sandboxName: spec.name,
+      cwd: spec.agentCwd,
+      binDir: spec.binDir,
+      binary: spec.binary,
+      guestEnv: guest,
+    });
+  }
   const envFile = writeEnvFile(spec, guest);
   const envArgs = ['--env-file', envFile.file];
   for (const name of Object.keys(envFile.inline)) envArgs.push('-e', name);
@@ -797,7 +1010,12 @@ function readCatalog() {
 
 // The catalog's sbx calls need only the instance and the run dir; no session values exist.
 function catalogTarget(catalog) {
-  return { stateHome: catalog.stateHome, runDir: catalog.runDir, env: {} };
+  return {
+    stateHome: catalog.stateHome,
+    runDir: catalog.runDir,
+    locksDir: path.join(path.dirname(catalog.runDir), 'locks'),
+    env: {},
+  };
 }
 
 // Paseo adds PASEO_AGENT_ID to every session's environment. A daemon started from inside an agent
@@ -852,13 +1070,39 @@ function runInCatalog(catalog) {
   for (const name of Object.keys(env)) {
     if (name.startsWith('ANTHROPIC_')) collectLoopbackPorts(env[name] || '', detected);
   }
+  if (env.OPENCODE_CONFIG_CONTENT) collectLoopbackPorts(env.OPENCODE_CONFIG_CONTENT, detected);
+  if (AGENT === 'opencode') {
+    for (const port of parentLoopbackPorts()) detected.add(port);
+  }
   // Only ports the catalog's policy allows are relayed; Update the catalog after adding one.
-  const ports = Array.from(detected).filter(function (port) { return catalog.ports.includes(port); });
+  // For opencode, Paseo's bridge binds an ephemeral port per daemon run: allow it on demand.
+  let allowed = Array.isArray(catalog.ports) ? catalog.ports.slice() : [];
+  if (AGENT === 'opencode') {
+    const extra = Array.from(detected).filter(function (port) { return !allowed.includes(port); });
+    if (extra.length > 0) {
+      const res = sbx(target, ['policy', 'allow', 'network', '--sandbox', catalog.name, extra.map(function (port) { return 'localhost:' + port; }).join(',')]);
+      if (res.status === 0) allowed = allowed.concat(extra);
+    }
+  }
+  const ports = Array.from(detected).filter(function (port) { return allowed.includes(port); });
   if (ports.length < detected.size) log('the ' + AGENT + ' catalog does not relay every loopback port its settings use: update it');
   const helpers = ports.length > 0
     ? 'missing=$(python3 "$1" --missing ' + ports.join(' ') + '); ' +
       'if [ -n "$missing" ]; then nohup python3 "$2" $missing >>/tmp/paseo-sbx-forward.log 2>&1 & python3 "$1" --wait $missing; fi; '
     : '';
+  if (AGENT === 'opencode' && args[0] === 'serve') {
+    return runServe(target, {
+      locksDir: target.locksDir,
+      sandboxName: catalog.name,
+      cwd: catalog.workdir,
+      binDir: catalog.binDir,
+      binary: catalog.binary,
+      guestEnv: env,
+      prefixScript: helpers,
+      prefixArgs: [path.join(catalog.binDir, 'wait-ports.py'), path.join(catalog.binDir, 'loopback-forward.py')],
+      timeoutMs: CATALOG_TIMEOUT_MS,
+    });
+  }
   const envFile = writeEnvFile(target, env);
   const envArgs = ['--env-file', envFile.file];
   for (const name of Object.keys(envFile.inline)) envArgs.push('-e', name);
@@ -935,12 +1179,13 @@ function shellMain() {
 }
 
 // What a session gets, for whichever agent you start by hand: Claude's config dir and your
-// Claude settings' env (your login), and Codex's shared home. The workspace record holds no
-// forwarded values, so variables from the variables file are not here.
+// Claude settings' env (your login), and Codex's and OpenCode's shared homes. The workspace record
+// holds no forwarded values, so variables from the variables file are not here.
 function shellEnv(spec) {
   const env = guestEnv(Object.assign({}, spec, { agent: 'claude', agentHome: null }));
   delete env.PASEO_SBX_MCP_GATEWAY;
   env.CODEX_HOME = path.join(spec.homesDir, 'codex');
+  env.PASEO_SBX_OPENCODE_DATA_HOME = path.join(spec.homesDir, 'opencode');
   env.PASEO_SBX_BIN = spec.binDir;
   env.PASEO_SBX_STARSHIP_CONFIG = starshipConfig(spec);
   return env;
@@ -1002,7 +1247,7 @@ function main() {
   ensureSandbox(spec);
   if (spec.agentHome) {
     const created = readState(spec).mounts;
-    if (created && !created.includes(spec.homesDir)) {
+    if (!created || !created.includes(spec.homesDir)) {
       throw new WrapperError(spec.name + ' predates shared agent homes: recreate it from its workspace panel to run ' + spec.agent);
     }
   }
@@ -1106,6 +1351,13 @@ claude() {
   token=$MCP_SENTINEL_TOKEN_NAME
   [ -n "$token" ] || token=proxy-managed
   command claude --mcp-config "{\"mcpServers\":{\"mcp-gateway\":{\"type\":\"http\",\"url\":\"$MCP_GATEWAY_URL\",\"headers\":{\"Authorization\":\"Bearer $token\"}}}}" "$@"
+}
+opencode() {
+  if [ -n "$PASEO_SBX_OPENCODE_DATA_HOME" ]; then
+    XDG_DATA_HOME="$PASEO_SBX_OPENCODE_DATA_HOME" command opencode "$@"
+  else
+    command opencode "$@"
+  fi
 }
 `;
 
@@ -1543,4 +1795,251 @@ async def main():
 
 
 asyncio.run(main())
+`;
+
+/**
+ * Runs `opencode serve` in the sandbox, relays `0.0.0.0:<relayPort>` to its loopback port so sbx
+ * can publish it to the host, rewrites the printed listening port to `<hostPort>`, and tears
+ * down the server tree when stdin reaches EOF.
+ */
+export const OPENCODE_SERVE_SOURCE = String.raw`# Written by the paseo-sbx Paseo plugin.
+import asyncio, os, re, signal, socket, subprocess, sys, threading, time
+
+GRACE = float(os.environ.get("PASEO_SBX_STOP_GRACE", "5"))
+RELAY_PORT = int(sys.argv[1])
+HOST_PORT = int(sys.argv[2])
+BINARY = sys.argv[3]
+ARGS = sys.argv[4:]
+
+
+def pick_vm_port():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def rewrite_port_args(argv, port):
+    out = []
+    replaced = False
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--port" and i + 1 < len(argv):
+            out.extend(["--port", str(port)])
+            replaced = True
+            i += 2
+            continue
+        if arg.startswith("--port="):
+            out.append("--port=" + str(port))
+            replaced = True
+            i += 1
+            continue
+        out.append(arg)
+        i += 1
+    if not replaced:
+        out.extend(["--port", str(port)])
+    return out
+
+
+VM_PORT = pick_vm_port()
+
+try:
+    child = subprocess.Popen(
+        [BINARY] + rewrite_port_args(ARGS, VM_PORT),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        start_new_session=True,
+    )
+except FileNotFoundError:
+    sys.stderr.write("[paseo-sbx] %s is not in this sandbox: its template lacks it. Add it to the template, or pick one built for it\n" % BINARY)
+    sys.exit(127)
+
+known = {}
+known_lock = threading.Lock()
+
+
+def scan():
+    children, starts = {}, {}
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/stat") as stat:
+                fields = stat.read().rsplit(")", 1)[1].split()
+            pid = int(entry)
+            children.setdefault(int(fields[1]), []).append(pid)
+            starts[pid] = fields[19]
+        except (OSError, IndexError, ValueError):
+            pass
+    return children, starts
+
+
+def remember_tree(prune=False):
+    children, starts = scan()
+    tree = set()
+    pending = [child.pid]
+    while pending:
+        for kid in children.get(pending.pop(), []):
+            if kid in starts:
+                tree.add(kid)
+            pending.append(kid)
+    prune = prune and child.poll() is None
+    with known_lock:
+        if prune:
+            for pid in [pid for pid in known if pid not in tree]:
+                del known[pid]
+        for kid in tree:
+            known[kid] = starts[kid]
+
+
+def signal_known(sig):
+    _, starts = scan()
+    with known_lock:
+        targets = [pid for pid, start in known.items() if starts.get(pid) == start]
+    for pid in targets:
+        try:
+            os.kill(pid, sig)
+        except OSError:
+            pass
+    return targets
+
+
+def track():
+    while child.poll() is None:
+        remember_tree(prune=True)
+        time.sleep(1)
+
+
+def wait_for_child(seconds):
+    deadline = time.monotonic() + seconds
+    while child.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+
+def watch_eof():
+    try:
+        while os.read(0, 65536):
+            pass
+    except OSError:
+        pass
+    remember_tree()
+    try:
+        child.stdin.close()
+    except OSError:
+        pass
+    if child.poll() is None:
+        try:
+            os.kill(child.pid, signal.SIGTERM)
+        except OSError:
+            pass
+        signal_known(signal.SIGTERM)
+        wait_for_child(GRACE)
+        if child.poll() is None:
+            try:
+                os.kill(child.pid, signal.SIGKILL)
+            except OSError:
+                pass
+
+
+async def pipe_stream(reader, writer):
+    try:
+        while data := await reader.read(65536):
+            writer.write(data)
+            await writer.drain()
+    except (ConnectionError, OSError):
+        pass
+    finally:
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except (ConnectionError, OSError):
+            pass
+
+
+def start_relay():
+    ready = threading.Event()
+    errors = []
+
+    async def handle(client_reader, client_writer):
+        for host in ("127.0.0.1", "::1"):
+            try:
+                reader, writer = await asyncio.open_connection(host, VM_PORT)
+                break
+            except OSError:
+                continue
+        else:
+            client_writer.close()
+            return
+        await asyncio.gather(pipe_stream(client_reader, writer), pipe_stream(reader, client_writer))
+
+    async def run():
+        try:
+            try:
+                server = await asyncio.start_server(handle, ["0.0.0.0", "::"], RELAY_PORT)
+            except OSError:
+                server = await asyncio.start_server(handle, "0.0.0.0", RELAY_PORT)
+        except OSError as error:
+            errors.append(error)
+            ready.set()
+            return
+        ready.set()
+        async with server:
+            await server.serve_forever()
+
+    threading.Thread(target=lambda: asyncio.run(run()), daemon=True).start()
+    ready.wait(5)
+    if errors:
+        raise errors[0]
+
+
+def forward(number, frame):
+    remember_tree()
+    try:
+        os.kill(child.pid, number)
+    except OSError:
+        pass
+    signal_known(number)
+
+
+def cleanup():
+    if signal_known(signal.SIGTERM):
+        time.sleep(0.5)
+        signal_known(signal.SIGKILL)
+    try:
+        os.killpg(child.pid, signal.SIGKILL)
+    except OSError:
+        pass
+
+
+threading.Thread(target=watch_eof, daemon=True).start()
+threading.Thread(target=track, daemon=True).start()
+for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+    signal.signal(sig, forward)
+
+relayed = False
+port_re = re.compile(r":" + re.escape(str(VM_PORT)) + r"(?=\D|$)")
+for raw in iter(child.stdout.readline, b""):
+    if not relayed and b"listening on" in raw:
+        relayed = True
+        try:
+            start_relay()
+        except OSError as error:
+            sys.stderr.write(f"[paseo-sbx] opencode relay {RELAY_PORT} -> {VM_PORT} failed: {error}\n")
+            sys.stderr.flush()
+            try:
+                os.kill(child.pid, signal.SIGTERM)
+            except OSError:
+                pass
+            break
+        text = raw.decode("utf-8", errors="replace")
+        text = port_re.sub(":" + str(HOST_PORT), text)
+        sys.stdout.buffer.write(text.encode("utf-8"))
+        sys.stdout.buffer.flush()
+        continue
+    sys.stdout.buffer.write(raw)
+    sys.stdout.buffer.flush()
+
+code = child.wait()
+cleanup()
+sys.exit(128 - code if code < 0 else code)
 `;
