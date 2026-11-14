@@ -34,7 +34,7 @@
     "vitest": "4.1.11",
     "zod": "^4.4.3"
   },
-  "description": "Run each Paseo workspace's Claude and Codex agents in its own Docker Sandboxes microVM.",
+  "description": "Run each Paseo workspace's Claude, Codex and OpenCode agents in its own Docker Sandboxes microVM.",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/drungrin/paseo-sbx.git"

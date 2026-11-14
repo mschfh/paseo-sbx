@@ -1,6 +1,6 @@
 # Docker Sandboxes for Paseo
 
-A Paseo plugin that runs each workspace's Claude Code and Codex agents inside its own [Docker Sandboxes](https://docs.docker.com/ai/sandboxes/) microVM. Agents work on the same files at the same paths, but every container, network, port and test browser they start lives in that workspace's VM. Workspaces stop colliding: a Postgres on port 5432 in one does not clash with another, and container churn in one no longer breaks browser tests in another.
+A Paseo plugin that runs each workspace's Claude Code, Codex and OpenCode agents inside its own [Docker Sandboxes](https://docs.docker.com/ai/sandboxes/) microVM. Agents work on the same files at the same paths, but every container, network, port and test browser they start lives in that workspace's VM. Workspaces stop colliding: a Postgres on port 5432 in one does not clash with another, and container churn in one no longer breaks browser tests in another.
 
 ![The workspace Sandbox dashboard: the sandbox's memory, CPUs and template, what needs you, and the agents running in it](docs/screenshots/panel-overview.png)
 
@@ -63,9 +63,9 @@ Releases are published on npm. To follow `main`, install from GitHub with `paseo
 
 Then:
 
-1. Open **Docker Sandboxes** in the sidebar and, in its **Agents** tab, press **Configure** for each agent. It registers the agent's provider (`claude-sbx`, `codex-sbx`) and creates its catalog sandbox. The first time, it asks you to allow downloading sbx's kit image from Docker Hub. Codex is off until you turn it on under **Agents** in the plugin settings.
-2. Store each agent's login once, then press **Update**. Codex signs in with `XDG_STATE_HOME=~/.local/state/paseo-sbx/sbx sbx secret set openai --oauth`. Claude signs in with the `env` of your Claude settings (a key or a gateway); without a login there, store the `anthropic` secret the same way.
-3. Pick **Claude (sandbox)** or **Codex (sandbox)** when you create an agent, or turn on **Run new Claude agents in sandboxes** in the plugin settings.
+1. Open **Docker Sandboxes** in the sidebar and, in its **Agents** tab, press **Configure** for each agent. It registers the agent's provider (`claude-sbx`, `codex-sbx`, `opencode-sbx`) and creates its catalog sandbox. The first time, it asks you to allow downloading sbx's kit image from Docker Hub. Codex and OpenCode are off until you turn them on under **Agents** in the plugin settings.
+2. Store each agent's login once, then press **Update**. Codex signs in with `XDG_STATE_HOME=~/.local/state/paseo-sbx/sbx sbx secret set openai --oauth`. Claude signs in with the `env` of your Claude settings (a key or a gateway); without a login there, store the `anthropic` secret the same way. OpenCode uses any of `anthropic`, `openai`, `google`, `openrouter`, `groq`, `xai`, or `github` secrets (or forwarded variables / local models).
+3. Pick **Claude (sandbox)**, **Codex (sandbox)** or **OpenCode (sandbox)** when you create an agent, or turn on **Run new Claude agents in sandboxes** in the plugin settings.
 
 [OVERVIEW.md](OVERVIEW.md) explains every setting and the plugin's limits.
 

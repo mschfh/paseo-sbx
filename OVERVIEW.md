@@ -1,8 +1,8 @@
-This plugin runs each workspace's Claude and Codex agents inside its own Docker Sandboxes microVM. Agents keep working on the same files at the same paths, but every Docker container, network, port and test browser they start lives in that workspace's VM. Sessions stop interfering with each other: a Postgres on port 5432 in one workspace does not collide with another, and container churn in one workspace no longer breaks Chromium tests in another.
+This plugin runs each workspace's Claude, Codex and OpenCode agents inside its own Docker Sandboxes microVM. Agents keep working on the same files at the same paths, but every Docker container, network, port and test browser they start lives in that workspace's VM. Sessions stop interfering with each other: a Postgres on port 5432 in one workspace does not collide with another, and container churn in one workspace no longer breaks Chromium tests in another.
 
 ## How it works
 
-The plugin adds `claude-sbx` and `codex-sbx` providers that extend Paseo's own Claude and Codex integrations. Paseo itself stays on the host; the agent's CLI, from the sandbox's template, and the tools it runs move into the VM. The workspace is mounted at its host path, so the file explorer, diffs and git keep working unchanged. Agents sign in through sbx's secrets, which its proxy adds to their requests: the token never enters the VM.
+The plugin adds `claude-sbx`, `codex-sbx` and `opencode-sbx` providers that extend Paseo's own Claude, Codex and OpenCode integrations. Paseo itself stays on the host; the agent's CLI, from the sandbox's template, and the tools it runs move into the VM. The workspace is mounted at its host path, so the file explorer, diffs and git keep working unchanged. Agents sign in through sbx's secrets, which its proxy adds to their requests: the token never enters the VM.
 
 Sandboxes come from a Docker Sandboxes instance that belongs to Paseo: your own `sbx` sandboxes are not listed or touched, and Paseo's sandboxes stop when the daemon stops. A sandbox is created the first time a sandboxed agent starts in a workspace and stops on its own 30 seconds after its last agent is archived. Paseo closes an idle agent's runtime after an hour; the plugin keeps the VM running for the agent anyway, so a job it left running there, such as a long test run, carries on. Each agent also has a small catalog sandbox that answers Paseo's version and model questions, so no agent CLI is needed on the host.
 
@@ -16,7 +16,7 @@ Other MCP servers reach agents through each sandbox's sbx MCP gateway. Register 
 
 Requires a Linux host with the Docker Sandboxes CLI (`sbx`) installed and signed in, and Paseo 0.13 or later. The `sbx` login lives in the OS keyring, which must be unlocked; on a headless host use a keyring without a password.
 
-Turn on the agents you want under **Agents** in the plugin settings, then open **Docker Sandboxes** in the sidebar and press **Configure** for each in its **Agents** tab, allowing the download of sbx's kit image when it asks. Store the agent's login once with `XDG_STATE_HOME=~/.local/state/paseo-sbx/sbx sbx secret set <service>` (`openai`, with `--oauth` for a ChatGPT login; `anthropic` if your Claude does not already sign in through its own settings) and press **Update**. Then pick **Claude (sandbox)** or **Codex (sandbox)** when creating an agent, or turn on **Run new Claude agents in sandboxes**.
+Turn on the agents you want under **Agents** in the plugin settings, then open **Docker Sandboxes** in the sidebar and press **Configure** for each in its **Agents** tab, allowing the download of sbx's kit image when it asks. Store the agent's login once with `XDG_STATE_HOME=~/.local/state/paseo-sbx/sbx sbx secret set <service>` (`openai`, with `--oauth` for a ChatGPT login; `anthropic` if your Claude does not already sign in through its own settings; any of `anthropic`, `openai`, `google`, `openrouter`, `groq`, `xai`, `github` for OpenCode) and press **Update**. Then pick **Claude (sandbox)**, **Codex (sandbox)** or **OpenCode (sandbox)** when creating an agent, or turn on **Run new Claude agents in sandboxes**.
 
 ## Settings
 
@@ -55,7 +55,7 @@ Agents in a sandbox see the workspace, the mounted folders and the forwarded var
 ## Limits
 
 - Terminals, workspace scripts and services from `paseo.json` still run on the host.
-- A template carries the CLIs of the agents it was prepared with: a workspace running Claude and Codex needs a template with both. Codex in a sandbox created before agents shared their homes asks for a Recreate. Importing Codex sessions from the host's `~/.codex` is not supported.
+- A template carries the CLIs of the agents it was prepared with: a workspace running Claude, Codex and OpenCode needs a template with those CLIs. Codex or OpenCode in a sandbox created before agents shared their homes asks for a Recreate. Importing Codex or OpenCode sessions from the host's `~/.codex` or `~/.local/share/opencode` is not supported.
 - Template, mounts, memory, CPUs and Docker disk are fixed when a sandbox is created. **Recreate** applies new ones once every agent of the sandbox is archived; it discards what runs inside the VM. Existing agents keep the sandbox they started in when you change the isolation mode.
 - Templates do not include the images of the VM's own Docker: each new sandbox pulls them again.
 - **Stop** in the panel shuts the VM's Docker down first. The automatic stop 30 seconds after the last agent is archived, and a restart of Paseo, are abrupt for what runs inside: databases go through crash recovery on the next start.

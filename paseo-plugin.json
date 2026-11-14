@@ -1,7 +1,7 @@
 {
   "id": "paseo-sbx",
   "name": "Docker Sandboxes",
-  "description": "Run each workspace's Claude and Codex agents in its own Docker Sandboxes microVM.",
+  "description": "Run each workspace's Claude, Codex and OpenCode agents in its own Docker Sandboxes microVM.",
   "media": [
     "docs/screenshots/panel-overview.png",
     "docs/screenshots/sandboxes-overview.png",
