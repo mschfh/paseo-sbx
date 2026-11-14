@@ -96,6 +96,18 @@ describe("agent.session_open", () => {
     expect(gsdUpdates).toBe(1);
   });
 
+  it("binds OpenCode sessions with XDG_DATA_HOME and routes OpenCode history to the catalog", async () => {
+    const result = await sessionOpen({ provider: "opencode-sbx", reason: "create" });
+    const spec = JSON.parse(result.env[SPEC_ENV]);
+    expect(spec.agent).toBe("opencode");
+    expect(result.env.XDG_DATA_HOME).toBe(join(paths.homesDir, "opencode"));
+
+    const history = await sessionOpen({ provider: "opencode-sbx", purpose: "history" });
+    expect(history.env.PASEO_SBX_ROUTE).toBe("catalog");
+    expect(history.env.XDG_DATA_HOME).toBe(join(paths.homesDir, "opencode"));
+    expect(history.env[SPEC_ENV]).toBeUndefined();
+  });
+
   it("reads history without a spec, a new binding or a config dir", async () => {
     const unbound = await sessionOpen({ purpose: "history" });
     expect(unbound.env).toEqual({});

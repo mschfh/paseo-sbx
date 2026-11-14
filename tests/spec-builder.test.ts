@@ -239,6 +239,28 @@ describe("buildSpec for agents", () => {
     expect(spec.mounts).toContain(paths.homesDir);
   });
 
+  it("gives OpenCode its shared data home and mounts Paseo's OpenCode bridge runtime dir", async () => {
+    const { home, repo, env, paths } = setup();
+    const paseoHome = join(root, "paseo");
+    const settings = sandboxSettingsSchema.parse({ enabledAgents: ["claude", "opencode"], claudeShared: [] });
+    const { spec } = await buildSpec({
+      settings,
+      workspaceId: null,
+      cwd: join(repo, "src"),
+      paths,
+      env: { ...env, PASEO_HOME: paseoHome },
+      home,
+      agent: "opencode",
+      hostMemoryBytes: 30 * GiB,
+    });
+    expect(spec.agent).toBe("opencode");
+    expect(spec.binary).toBe("opencode");
+    expect(spec.kit).toBe("opencode");
+    expect(spec.agentHome).toEqual({ env: "XDG_DATA_HOME", path: join(paths.homesDir, "opencode") });
+    expect(spec.mounts).toEqual([paths.homesDir, `${join(paseoHome, "runtime", "opencode")}:ro`]);
+    expect(existsSync(join(paseoHome, "runtime", "opencode"))).toBe(true);
+  });
+
   it("signs Claude in through the sbx secret only when nothing else signs it in", async () => {
     const { home, hostClaude, repo, env, paths } = setup();
     const settings = sandboxSettingsSchema.parse({ githubHttps: false });

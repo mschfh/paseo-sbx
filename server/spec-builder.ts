@@ -40,6 +40,7 @@ import {
 import { canonical, git } from "./git";
 import { gsdPathMembers, usesGsdPath, type GsdPathMember } from "./gsd-path";
 import type { PluginPaths } from "./paths";
+import { opencodeRuntimeDir } from "./paths";
 import { repoIdentity } from "./repo";
 import { secretsFor, type StoredSecret } from "./sbx";
 import { readSandboxState } from "./state";
@@ -455,6 +456,11 @@ export async function buildSpec(input: SpecInput): Promise<BuiltSpec> {
     if (target !== shared) requested.push({ path: target, readOnly: true, source: "claude" });
   }
   requested.push({ path: paths.homesDir, readOnly: false, source: "agents" });
+  if (settings.enabledAgents.includes("opencode") || input.agent === "opencode") {
+    const runtimeDir = opencodeRuntimeDir(env, home);
+    if (input.prepare !== false) mkdirSync(runtimeDir, { recursive: true });
+    requested.push({ path: runtimeDir, readOnly: true, source: "agents" });
+  }
   const sourced = mergeMounts(requested).filter((mount) => !isWithin(mount.path, directory));
   const mounts = sourced.map(formatMount);
   const homeMounts: HomeMount[] = sourced
