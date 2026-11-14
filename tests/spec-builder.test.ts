@@ -255,7 +255,7 @@ describe("buildSpec for agents", () => {
     });
     expect(spec.agent).toBe("opencode");
     expect(spec.binary).toBe("opencode");
-    expect(spec.kit).toBe("opencode");
+    expect(spec.kit).toBe("docker.io/docker/sbx-kit-opencode:latest");
     expect(spec.agentHome).toEqual({ env: "XDG_DATA_HOME", path: join(paths.homesDir, "opencode") });
     expect(spec.mounts).toEqual([paths.homesDir, `${join(paseoHome, "runtime", "opencode")}:ro`]);
     expect(existsSync(join(paseoHome, "runtime", "opencode"))).toBe(true);

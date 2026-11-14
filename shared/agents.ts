@@ -73,7 +73,10 @@ export const AGENTS: Record<AgentId, AgentDescriptor> = {
     extends: "opencode",
     label: "OpenCode (sandbox)",
     description: "OpenCode running in this workspace's Docker Sandboxes microVM",
-    kit: "opencode",
+    // The v3 workload kit: sbx's built-in opencode agent still resolves to its v2 image
+    // (docker.io/sbx/opencode-image), which ships no python3 and breaks the plugin's guest
+    // helpers. Referencing the kit image directly opts in before sbx drops the built-in name.
+    kit: "docker.io/docker/sbx-kit-opencode:latest",
     binary: "opencode",
     secretService: "anthropic",
     secretServices: ["anthropic", "openai", "google", "openrouter", "groq", "xai", "github"],

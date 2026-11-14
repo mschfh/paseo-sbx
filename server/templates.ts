@@ -1,5 +1,5 @@
 import { totalmem } from "node:os";
-import { kitForFlavor } from "../shared/agents";
+import { AGENTS, kitForFlavor, type AgentId } from "../shared/agents";
 import type { SandboxSettings } from "../shared/settings";
 import { TEMPLATE_TAG_PATTERN, memoryMiB, normalizeTemplateRef, templatePrepName } from "../shared/spec";
 import type { ServerDeps } from "./hooks";
@@ -149,7 +149,11 @@ export async function ensureTemplatePrep(deps: ServerDeps, cwd: string): Promise
     const found = findTemplate(await listTemplates(paths), template);
     if (!found) throw new Error(`template ${template} not found`);
     args.push("-t", template, "--pull", "never");
-    kit = kitForFlavor(found.flavor) ?? kit;
+    // The flavor names the sbx agent whose kit built the template ("opencode-docker" →
+    // "opencode"); create from that agent's own kit, which for OpenCode is the full kit image.
+    const agent = kitForFlavor(found.flavor);
+    const descriptor = agent && agent in AGENTS ? AGENTS[agent as AgentId] : undefined;
+    kit = descriptor ? descriptor.kit : agent ?? kit;
   }
   await runSbxOk(paths, [...args, kit], `sbx create ${name}`);
   await runSbxOk(

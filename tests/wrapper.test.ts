@@ -1117,7 +1117,7 @@ server.listen(port, '127.0.0.1', () => {
     const sandbox = spec({
       agent: "opencode",
       binary: "opencode",
-      kit: "opencode",
+      kit: "docker.io/docker/sbx-kit-opencode:latest",
       agentHome: { env: "XDG_DATA_HOME", path: join(homesDir, "opencode") },
       homesDir,
       mounts: [homesDir],

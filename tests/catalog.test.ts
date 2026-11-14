@@ -56,7 +56,7 @@ describe("catalog", () => {
     const runtimeDir = opencodeRuntimeDir(process.env);
     expect(existsSync(runtimeDir)).toBe(true);
     expect(create?.args).toContain(`${runtimeDir}:ro`);
-    expect(create?.args).toContain("opencode");
+    expect(create?.args).toContain("docker.io/docker/sbx-kit-opencode:latest");
 
     // Stored secrets: any of OpenCode's supported provider services marks login.stored true.
     fake.setState({
