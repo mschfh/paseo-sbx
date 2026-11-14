@@ -62,7 +62,7 @@ export function useDownloadConsent() {
 export type DownloadConsent = ReturnType<typeof useDownloadConsent>;
 
 export const DOWNLOAD_TERMS =
-  "Sandboxes and agent catalogs start from sbx's kit images, downloaded from Docker Hub (docker/sandbox-templates) the first time one is needed: about 1.1 GB for Claude and 1.3 GB for Codex. Sandboxes created from your templates use the local image.";
+  "Sandboxes and agent catalogs start from sbx's kit images, downloaded from Docker Hub (docker/sandbox-templates) the first time one is needed: about 1.1 GB for Claude and 1.3 GB for Codex or OpenCode. Sandboxes created from your templates use the local image.";
 
 /**
  * The question, shown where an action waits for consent; nothing is downloaded until you allow it.

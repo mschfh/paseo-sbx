@@ -258,7 +258,7 @@ export function SandboxesScreen({ theme, layout, openSettings }: SandboxesScreen
                 theme={theme}
                 compact={compact}
                 title="Agents"
-                description="The sandbox providers: Paseo's Claude and Codex, running in each workspace's VM."
+                description="The sandbox providers: Paseo's Claude, Codex and OpenCode, running in each workspace's VM."
                 {...header}
                 notes={[
                   "Sessions run the CLI of the workspace's template. Each agent's catalog sandbox answers Paseo's version and model queries; Update recreates it from sbx's latest kit.",
@@ -343,7 +343,7 @@ function screenNeeds(
         detail: "Configure registers its provider and creates its catalog sandbox.",
         action: { label: "Agents", onPress: () => go("agents") },
       });
-    } else if (agent.id !== "claude" && !agent.login.stored) {
+    } else if (agent.id === "codex" && !agent.login.stored) {
       needs.push({
         tone: "warning",
         title: `${agent.label} has no login`,
@@ -874,6 +874,24 @@ function loginView(agent: AgentStatus, stateHome: string): { tone: Tone; label: 
       command,
     };
   }
+  if (agent.id === "opencode") {
+    const services = agent.login.services;
+    if (agent.login.stored) {
+      return {
+        tone: "success",
+        label: "Signed in",
+        detail: `Through the sbx ${services.length > 0 ? services.join(", ") : agent.login.service} ${services.length === 1 ? "secret" : "secrets"}.`,
+        command: null,
+      };
+    }
+    return {
+      tone: "neutral",
+      label: "No sbx secret",
+      detail:
+        "Store a provider key (anthropic, openai, google, openrouter, groq, xai, github), forward keys in Variables, or use a local model:",
+      command: `XDG_STATE_HOME=${stateHome} sbx secret set <provider>`,
+    };
+  }
   return agent.login.stored
     ? { tone: "success", label: "Signed in", detail: `Through the sbx ${agent.login.service} secret.`, command: null }
     : { tone: "warning", label: "No login", detail: `Store the sbx ${agent.login.service} secret, then press Update:`, command };
@@ -889,7 +907,7 @@ function AgentList({ status, theme, compact }: { status: Status; theme: Theme; c
       <Empty
         theme={theme}
         title="No agents turned on"
-        detail="Turn Claude or Codex on in the plugin settings to add it to the + menu."
+        detail="Turn Claude, Codex or OpenCode on in the plugin settings to add it to the + menu."
       />
     );
   }

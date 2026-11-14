@@ -1,5 +1,5 @@
 /** Agents the plugin runs in sandboxes: those sbx ships a kit for and Paseo has a provider for. */
-export const AGENT_IDS = ["claude", "codex"] as const;
+export const AGENT_IDS = ["claude", "codex", "opencode"] as const;
 export type AgentId = (typeof AGENT_IDS)[number];
 
 export interface AgentDescriptor {
@@ -14,8 +14,10 @@ export interface AgentDescriptor {
   kit: string;
   /** CLI the sessions run, found on the guest's PATH (the template's). */
   binary: string;
-  /** sbx service secret its proxy signs in with. */
+  /** Primary sbx service secret its proxy signs in with. */
   secretService: string;
+  /** All sbx service secrets its proxy can sign in with. */
+  secretServices: readonly string[];
   /** How to add the CLI to a template that lacks it. */
   install: string;
   /**
@@ -43,6 +45,7 @@ export const AGENTS: Record<AgentId, AgentDescriptor> = {
     kit: "claude",
     binary: "claude",
     secretService: "anthropic",
+    secretServices: ["anthropic"],
     install: "curl -fsSL https://claude.ai/install.sh | bash",
     sharedHome: null,
     kitFiles: [],
@@ -56,12 +59,27 @@ export const AGENTS: Record<AgentId, AgentDescriptor> = {
     kit: "codex",
     binary: "codex",
     secretService: "openai",
+    secretServices: ["openai"],
     install: "npm install -g @openai/codex",
     sharedHome: { env: "CODEX_HOME", dir: "codex", kitHome: ".codex" },
     kitFiles: [
       { path: "auth.json", replace: true },
       { path: "config.toml", replace: false },
     ],
+  },
+  opencode: {
+    id: "opencode",
+    providerId: "opencode-sbx",
+    extends: "opencode",
+    label: "OpenCode (sandbox)",
+    description: "OpenCode running in this workspace's Docker Sandboxes microVM",
+    kit: "opencode",
+    binary: "opencode",
+    secretService: "anthropic",
+    secretServices: ["anthropic", "openai", "google", "openrouter", "groq", "xai", "github"],
+    install: "curl -fsSL https://opencode.ai/install | bash",
+    sharedHome: { env: "XDG_DATA_HOME", dir: "opencode", kitHome: ".local/share" },
+    kitFiles: [{ path: "opencode/auth.json", replace: true }],
   },
 };
 

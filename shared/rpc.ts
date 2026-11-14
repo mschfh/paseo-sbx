@@ -48,6 +48,8 @@ const agentStatusSchema = z.object({
   login: z.object({
     service: z.string(),
     stored: z.boolean(),
+    /** Stored sbx service secrets matching this agent (for multi-provider agents such as OpenCode). */
+    services: z.array(z.string()).default([]),
     /**
      * Claude only: the login sessions get on their own, which wins over the secret. From your
      * Claude settings' env or the daemon's environment (variable names only); `helper` when your

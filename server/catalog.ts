@@ -1,8 +1,9 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { AGENTS, type AgentId } from "../shared/agents";
 import type { SandboxSettings } from "../shared/settings";
 import { catalogName } from "../shared/spec";
+import { opencodeRuntimeDir } from "./paths";
 import { newLockToken, withSandboxLock } from "./lock";
 import type { PluginPaths } from "./paths";
 import { assertImageDownloadsAllowed, listSandboxes, removeSandbox, runSbx, runSbxOk, storedSecrets } from "./sbx";
@@ -85,18 +86,26 @@ export interface CatalogStatus {
   record: CatalogRecord | null;
   exists: boolean;
   /** The service secret the agent signs in with, and whether one applies to the catalog. */
-  login: { service: string; stored: boolean };
+  login: { service: string; stored: boolean; services: string[] };
 }
 
 export async function catalogStatus(paths: PluginPaths, agent: AgentId): Promise<CatalogStatus> {
   const name = catalogName(agent, paths.stateHome);
   const [sandboxes, secrets] = await Promise.all([listSandboxes(paths), storedSecrets(paths).catch(() => [])]);
   const service = AGENTS[agent].secretService;
+  const supported = AGENTS[agent].secretServices;
+  const services = [
+    ...new Set(
+      secrets
+        .filter((s) => supported.includes(s.service) && (s.scope === "global" || s.scope === name))
+        .map((s) => s.service),
+    ),
+  ].sort();
   return {
     name,
     record: readCatalog(paths, agent),
     exists: sandboxes.some((sandbox) => sandbox.name === name),
-    login: { service, stored: secrets.some((s) => s.service === service && (s.scope === "global" || s.scope === name)) },
+    login: { service, stored: services.length > 0, services },
   };
 }
 
@@ -154,14 +163,39 @@ export async function ensureCatalog(
       ports = loopbackPorts([...values, ...Object.entries(process.env).filter(([k]) => k.startsWith("ANTHROPIC_")).map(([, v]) => v ?? "")]);
     }
 
+    const extraMounts: string[] = [];
+    if (agent === "opencode") {
+      const runtimeDir = opencodeRuntimeDir();
+      mkdirSync(runtimeDir, { recursive: true });
+      extraMounts.push(`${runtimeDir}:ro`);
+      ports = loopbackPorts([
+        process.env.OPENCODE_CONFIG_CONTENT ?? "",
+        process.env.PASEO_OPENCODE_BRIDGE_PORT ? `127.0.0.1:${process.env.PASEO_OPENCODE_BRIDGE_PORT}` : "",
+      ]);
+    }
+
     await runSbxOk(
       paths,
-      ["create", "--name", name, "--memory", "1024m", "--no-progress", descriptor.kit, workdir, paths.homesDir, `${paths.binDir}:ro`],
+      [
+        "create",
+        "--name",
+        name,
+        "--memory",
+        "1024m",
+        "--no-progress",
+        descriptor.kit,
+        workdir,
+        paths.homesDir,
+        `${paths.binDir}:ro`,
+        ...extraMounts,
+      ],
       `sbx create ${name}`,
       900_000,
     );
     const rules = [...settings.networkAllow, ...ports.map((port) => `localhost:${port}`)];
-    await runSbxOk(paths, ["policy", "allow", "network", "--sandbox", name, rules.join(",")], "sbx policy allow");
+    if (rules.length > 0) {
+      await runSbxOk(paths, ["policy", "allow", "network", "--sandbox", name, rules.join(",")], "sbx policy allow");
+    }
 
     if (descriptor.sharedHome && agentHome) {
       for (const file of descriptor.kitFiles) {
@@ -169,6 +203,7 @@ export async function ensureCatalog(
         if (!file.replace && existsSync(target)) continue;
         const read = await runSbx(paths, ["exec", name, "cat", `/home/agent/${descriptor.sharedHome.kitHome}/${file.path}`]);
         if (read.code !== 0) continue;
+        mkdirSync(dirname(target), { recursive: true });
         writeFileSync(target, read.stdout, { mode: 0o600 });
         chmodSync(target, 0o600);
       }

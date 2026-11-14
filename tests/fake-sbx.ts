@@ -116,6 +116,8 @@ if (args[0] === 'ls') {
   process.stdin.pipe(guest.stdin);
   guest.stdin.on('error', () => {});
   guest.on('exit', (code) => process.exit(code === null ? 1 : code));
+} else if (args[0] === 'secret' && args[1] === 'ls') {
+  process.stdout.write(JSON.stringify({ secrets: state.serviceSecrets || [] }));
 } else if (args[0] === 'secret' && args[1] === 'set') {
   state.secrets = state.secrets || {};
   state.secrets[args[2]] = fs.readFileSync(0, 'utf8');
@@ -215,7 +217,12 @@ export interface FakeSbx {
   env: Record<string, string>;
   calls(): SbxCall[];
   clearCalls(): void;
-  setState(state: { sandboxes?: string[]; stopped?: string[]; templates?: { id: string; repository: string; tag: string }[] }): void;
+  setState(state: {
+    sandboxes?: string[];
+    stopped?: string[];
+    templates?: { id: string; repository: string; tag: string }[];
+    serviceSecrets?: { scope?: string; type: string; name: string }[];
+  }): void;
   sandboxes(): string[];
 }
 
